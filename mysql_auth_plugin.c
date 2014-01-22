@@ -40,8 +40,9 @@
 #include <openssl/sha.h>
 
 /*
- * gcc -I<path to mosquitto_plugin.h> -fPIC -shared mysql_auth_plugin.c \
- *   -o mysql_auth_plugin.so `mysql_config --cflags --libs` -lcrypto
+ * gcc -I<path to mosquitto src>/lib/ -I<path to mosquitto src>/src/ \
+ * -fPIC -shared mysql_auth_plugin.c -o mysql_auth_plugin.so `mysql_config --cflags --libs` -lcrypto
+ *
  * [libssl and libmysql development packages are required]
  *
  * Configuration example to put in mosquitto conf file:
@@ -191,6 +192,9 @@ int mysql_check_pwd(struct mysql_auth_data *data, const char *mqtt_username, con
     char queryString[QUERY_STRING_MAX_SIZE];
     char pwdHash[DIGEST_STRING_LENGTH];
     MYSQL *con = data->connection;
+
+    if (mqtt_username == NULL || mqtt_password == NULL)
+        return 1;
 
     snprintf(queryString, QUERY_STRING_MAX_SIZE,
         "SELECT %s FROM %s WHERE %s IS FALSE AND %s = \"%s\"",
