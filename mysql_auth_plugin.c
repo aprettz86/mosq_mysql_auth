@@ -38,6 +38,7 @@
 #include <mosquitto_plugin.h>
 #include <mysql.h>
 #include <openssl/sha.h>
+#include <syslog.h>
 
 /*
  * gcc -I<path to mosquitto src>/lib/ -I<path to mosquitto src>/src/ \
@@ -57,14 +58,17 @@
  * auth_opt_db_username_column_name user
  * auth_opt_db_password_column_name password
  * auth_opt_db_disabled_column_name disabled
+ * auth_opt_log_type all
+ * [information, error, warning, notice, debug, none, all]
  */
 
-#define TAG "[mysql_auth_plugin] "
+//#define TAG "[mysql_auth_plugin] "
 
 #define QUERY_STRING_MAX_SIZE  (2048)
 #define DIGEST_LENGTH          (SHA256_DIGEST_LENGTH)
 #define DIGEST_STRING_LENGTH   (DIGEST_LENGTH * 2 + 1)
 
+#define SYSLOG_IDENTITY        "mosq_mysql_auth"
 
 void build_digest_string(const char *passwd, char *digest_string) {
     unsigned char digest[DIGEST_LENGTH];
@@ -87,6 +91,7 @@ const char *param_db_table    = "db_table";
 const char *param_db_username_column_name = "db_username_column_name";
 const char *param_db_password_column_name = "db_password_column_name";
 const char *param_db_disabled_column_name = "db_disabled_column_name";
+const char *param_log_type = "log_type";
 
 struct mysql_auth_data {
     MYSQL *connection;
@@ -100,6 +105,7 @@ struct mysql_auth_data {
     const char *param_db_username_column_name;
     const char *param_db_password_column_name;
     const char *param_db_disabled_column_name;
+    int log_mask;
 };
 
 int mysql_auth_data_init(struct mysql_auth_data *data,
@@ -107,7 +113,11 @@ int mysql_auth_data_init(struct mysql_auth_data *data,
 {
     memset((void*)data, 0, sizeof(*data));
 
-    int i;
+    data->log_mask = (LOG_MASK(LOG_INFO) | LOG_MASK(LOG_ERR) |
+                      LOG_MASK(LOG_WARNING) | LOG_MASK(LOG_NOTICE));
+
+
+    int i, logmask = 0;
     for(i = 0; i < auth_opt_count; i++) {
         const char *key = auth_opts[i].key;
         const char *value = auth_opts[i].value;
@@ -130,6 +140,28 @@ int mysql_auth_data_init(struct mysql_auth_data *data,
             data->param_db_disabled_column_name = strdup(value);
         } else if (strcmp(key, param_db_port) == 0) {
             data->param_db_port = atoi(value);
+        } else if (strcmp(key, param_log_type) == 0) {
+            if (logmask == 0) {
+                data->log_mask = 0;
+                logmask = 1;
+            }
+            if (strcmp(value, "debug") == 0) {
+                data->log_mask |= LOG_MASK(LOG_DEBUG);
+            } else if (strcmp(value, "information") == 0) {
+                data->log_mask |= LOG_MASK(LOG_INFO);
+            } else if (strcmp(value, "error") == 0) {
+                data->log_mask |= LOG_MASK(LOG_ERR);
+            } else if (strcmp(value, "warning") == 0) {
+                data->log_mask |= LOG_MASK(LOG_WARNING);
+            } else if (strcmp(value, "notice") == 0) {
+                data->log_mask |= LOG_MASK(LOG_NOTICE);
+            } else if (strcmp(value, "none") == 0) {
+                data->log_mask = LOG_UPTO(LOG_ALERT);
+            } else if (strcmp(value, "all") == 0) {
+                data->log_mask |= (LOG_MASK(LOG_INFO) | LOG_MASK(LOG_DEBUG) |
+                                   LOG_MASK(LOG_ERR) | LOG_MASK(LOG_WARNING) |
+                                   LOG_MASK(LOG_NOTICE));
+            }
         }
     }
 
@@ -138,10 +170,10 @@ int mysql_auth_data_init(struct mysql_auth_data *data,
 }
 
 void mysql_auth_data_print(const struct mysql_auth_data *data) {
-#define _PH(F) fprintf(stderr, TAG "%s: %s\n", #F, data->F)
+#define _PH(F) syslog(LOG_DEBUG, "%s: %s\n", #F, data->F)
 
     _PH(param_db_hostname);
-    fprintf(stderr, TAG "%s: %d\n", param_db_port, data->param_db_port);
+    syslog(LOG_DEBUG, "param_db_port: %d\n", data->param_db_port);
     _PH(param_db_username);
     _PH(param_db_password);
     _PH(param_db_hostname);
@@ -150,6 +182,7 @@ void mysql_auth_data_print(const struct mysql_auth_data *data) {
     _PH(param_db_username_column_name);
     _PH(param_db_password_column_name);
     _PH(param_db_disabled_column_name);
+    syslog(LOG_DEBUG, "param_log_type: %d\n", data->log_mask);
 }
 
 void mysql_auth_data_free(struct mysql_auth_data *data) {
@@ -176,7 +209,7 @@ int mysql_mosq_connect(struct mysql_auth_data *data) {
                            data->param_db_database,
                            data->param_db_port, NULL, 0) == NULL)
     {
-        fprintf(stderr, TAG "%s\n", mysql_error(data->connection));
+        syslog(LOG_ERR, "mysql_real_connect: \"%s\"\n", mysql_error(data->connection));
         return 1;
     }
     return 0;
@@ -193,6 +226,9 @@ int mysql_check_pwd(struct mysql_auth_data *data, const char *mqtt_username, con
     char pwdHash[DIGEST_STRING_LENGTH];
     MYSQL *con = data->connection;
 
+    syslog(LOG_DEBUG, "%s: username <%s>, password <%s>\n",
+                       __PRETTY_FUNCTION__, mqtt_username, mqtt_password);
+
     if (mqtt_username == NULL || mqtt_password == NULL)
         return 1;
 
@@ -203,19 +239,23 @@ int mysql_check_pwd(struct mysql_auth_data *data, const char *mqtt_username, con
         data->param_db_disabled_column_name,
         data->param_db_username_column_name, mqtt_username);
 
+    syslog(LOG_DEBUG, "Query: \"%s\"\n", queryString);
+
 
     if (mysql_query(con, queryString)) {
-        fprintf(stderr, TAG "%s\n", mysql_error(con));
+        syslog(LOG_ERR, "mysql_query: \"%s\"\n", mysql_error(con));
         if (mysql_mosq_connect(data))
             return 1;
-        else if (mysql_query(con, queryString))
+        else if (mysql_query(con, queryString)) {
+            syslog(LOG_ERR, "mysql_query [retry]: \"%s\"\n", mysql_error(con));
             return 1;
+        }
     }
 
     MYSQL_RES *result = mysql_store_result(con);
 
     if (result == NULL) {
-        fprintf(stderr, TAG "%s\n", mysql_error(con));
+        syslog(LOG_ERR, "mysql_store_result: \"%s\"\n", mysql_error(con));
         return authorized;
     }
 
@@ -225,16 +265,16 @@ int mysql_check_pwd(struct mysql_auth_data *data, const char *mqtt_username, con
     build_digest_string(mqtt_password, pwdHash);
 
     if (numRows < 1) {
-        fprintf(stderr, "User \"%s\" not found or not enabled\n", mqtt_username);
+        syslog(LOG_INFO, "User \"%s\" not found or not enabled\n", mqtt_username);
         authorized = 2;
         //mysql_free_result(result);
     } else if (numRows > 1) {
-        fprintf(stderr,
+        syslog(LOG_ERR,
             "User \"%s\" has more than one row associated [WTF ??]\n", mqtt_username);
         authorized = 3;
         //mysql_free_result(result);
     } else if (numFields != 1) {
-        fprintf(stderr, "Wrong query: no culumn named \"%s\"\n",
+        syslog(LOG_ERR, "Wrong query: no culumn named \"%s\"\n",
             data->param_db_password_column_name);
         authorized = 4;
     } else {
@@ -242,10 +282,10 @@ int mysql_check_pwd(struct mysql_auth_data *data, const char *mqtt_username, con
 
         row = mysql_fetch_row(result);
         if (strcmp(row[0], pwdHash) == 0) {
-            fprintf(stderr, "Password for \"%s\" is CORRECT\n", mqtt_username);
+            syslog(LOG_INFO, "Password for \"%s\" is CORRECT\n", mqtt_username);
             authorized = 0;
         } else {
-            fprintf(stderr, "Password for \"%s\" is NOT CORRECT\n", mqtt_username);
+            syslog(LOG_INFO, "Password for \"%s\" is NOT CORRECT\n", mqtt_username);
             authorized = 5;
         }
     }
@@ -283,6 +323,12 @@ int mosquitto_auth_security_init(void *user_data, struct mosquitto_auth_opt *aut
     struct mysql_auth_data* auth_data = (struct mysql_auth_data*)user_data;
 
     mysql_auth_data_init(auth_data, auth_opts, auth_opt_count);
+
+    openlog (SYSLOG_IDENTITY, LOG_CONS | LOG_PID | LOG_NDELAY, 0);
+
+    setlogmask(auth_data->log_mask);
+    syslog(LOG_DEBUG, __PRETTY_FUNCTION__);
+
     mysql_auth_data_print(auth_data);
 
     // open DB connection
@@ -298,18 +344,25 @@ int mosquitto_auth_security_cleanup(void *user_data, struct mosquitto_auth_opt *
 {
     struct mysql_auth_data* auth_data = (struct mysql_auth_data*)user_data;
 
+    syslog(LOG_DEBUG, __PRETTY_FUNCTION__);
+    closelog();
+
     mysql_close(auth_data->connection);
     return MOSQ_ERR_SUCCESS;
 }
 
 int mosquitto_auth_acl_check(void *user_data, const char *clientid, const char *username, const char *topic, int access)
 {
+    syslog(LOG_DEBUG, "%s [This function does nothing]", __PRETTY_FUNCTION__ );
+
     return MOSQ_ERR_SUCCESS;
 }
 
 int mosquitto_auth_unpwd_check(void *user_data, const char *username, const char *password)
 {
     struct mysql_auth_data* auth_data = (struct mysql_auth_data*)user_data;
+
+    syslog(LOG_DEBUG, __PRETTY_FUNCTION__);
 
     if (mysql_check_pwd(auth_data, username, password))
         return MOSQ_ERR_AUTH;
@@ -319,6 +372,8 @@ int mosquitto_auth_unpwd_check(void *user_data, const char *username, const char
 
 int mosquitto_auth_psk_key_get(void *user_data, const char *hint, const char *identity, char *key, int max_key_len)
 {
+    syslog(LOG_DEBUG, "%s [This function does nothing]", __PRETTY_FUNCTION__ );
+
     return MOSQ_ERR_AUTH;
 }
 
