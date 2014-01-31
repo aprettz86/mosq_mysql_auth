@@ -144,7 +144,6 @@ void mysql_auth_data_print(const struct mysql_auth_data *data) {
     fprintf(stderr, TAG "%s: %d\n", param_db_port, data->param_db_port);
     _PH(param_db_username);
     _PH(param_db_password);
-    _PH(param_db_hostname);
     _PH(param_db_database);
     _PH(param_db_table);
     _PH(param_db_username_column_name);
@@ -158,7 +157,6 @@ void mysql_auth_data_free(struct mysql_auth_data *data) {
     _FH(param_db_hostname);
     _FH(param_db_username);
     _FH(param_db_password);
-    _FH(param_db_hostname);
     _FH(param_db_database);
     _FH(param_db_table);
     _FH(param_db_username_column_name);
@@ -263,18 +261,12 @@ int mosquitto_auth_plugin_init(void **user_data, struct mosquitto_auth_opt *auth
     struct mysql_auth_data *data = malloc(sizeof(struct mysql_auth_data));
 
     *user_data = (void*)data;
-    mysql_auth_data_init(data, auth_opts, auth_opt_count);
-
     return MOSQ_ERR_SUCCESS;
 }
 
 int mosquitto_auth_plugin_cleanup(void *user_data, struct mosquitto_auth_opt *auth_opts, int auth_opt_count)
 {
-    struct mysql_auth_data* auth_data = (struct mysql_auth_data*)user_data;
-
-    mysql_auth_data_free(auth_data);
     free(user_data);
-
     return MOSQ_ERR_SUCCESS;
 }
 
@@ -299,6 +291,8 @@ int mosquitto_auth_security_cleanup(void *user_data, struct mosquitto_auth_opt *
     struct mysql_auth_data* auth_data = (struct mysql_auth_data*)user_data;
 
     mysql_close(auth_data->connection);
+    mysql_auth_data_free(auth_data);
+    mysql_library_end();
     return MOSQ_ERR_SUCCESS;
 }
 
