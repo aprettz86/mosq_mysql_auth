@@ -16,7 +16,7 @@
 
 /*
  * Version History
- * Current Version: 0.0.1
+ * Current Version: 0.0.2
  *
  * 0.0.1:
  *  First implementation, main features are:
@@ -26,6 +26,10 @@
  *    - support reconfiguration and reconnectionon reloading
  *    - try to reconnect at each authentication request if the
  *      connection was lost
+ * 0.0.2:
+ *  Many bug fixes (memory leaks and double free on reload signal)
+ *  Syslog logging
+ *
  *  TODO
  *    - implement ACL policy [?? maybe]
  *    - support more hashing policies
@@ -60,6 +64,12 @@
  * auth_opt_db_disabled_column_name disabled
  * auth_opt_log_type all
  * [information, error, warning, notice, debug, none, all]
+ *
+ * "auth_opt_log_type" defaults to:
+ * auth_opt_log_type information
+ * auth_opt_log_type warning
+ * auth_opt_log_type error
+ * auth_opt_log_type notice
  */
 
 //#define TAG "[mysql_auth_plugin] "
